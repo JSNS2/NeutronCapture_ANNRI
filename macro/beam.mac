@@ -1,0 +1,21 @@
+#
+/gps/particle  neutron
+/gps/energy    0.025 eV
+/gps/pos/type  Beam
+#
+#the incident surface is in the y-z plane
+/gps/pos/rot1 0 1 0
+/gps/pos/rot2 0 0 1
+#
+#the beam spot is center at the (30,0,0) and is
+#of 1d gaussian shape with a 15mm central plateau
+/gps/pos/shape Circle
+/gps/pos/centre 30. 3.5 -3.9 mm
+#/gps/pos/centre 30. 0. 0. mm
+/gps/pos/radius 0.1 mm
+/gps/pos/sigma_r 0. mm
+
+/gps/direction -1. 0. 0.
+
+#/run/beamOn 1000000
+/run/beamOn 100

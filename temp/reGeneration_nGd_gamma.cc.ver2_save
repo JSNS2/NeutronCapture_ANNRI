@@ -1,0 +1,439 @@
+
+//--------------------------------------------------------------------
+//Built since 2018.08.15
+//
+//	Author : HK_Jeon
+//	Monte-Carlo Simulation Validation code.
+//
+//	Update Log
+//	15-Aug-2018 ( V-0.1.0 ) : Construct basic code structure
+//	15-Aug-2018 ( V-0.1.0 ) : Added "Output file setting"
+//	16-Aug-2018 ( V-0.1.1 ) : Added processing time calculator.
+//	13-Dec-2018 ( V-0.1.2 ) : Added Progress bar viualizing.
+//
+//	08-Mar-2019 ( V-0.2.0 ) : Initialized for ROOT ver 6
+//	12-Mar-2019	( V-0.2.1 ) : Added PMT geometry Plot.
+//	10-Jun-2019 ( V-0.2.2 ) : Add PMT Hitmap information for CNN study
+//
+//	08-Sep-2020 ( V-0.3.0 ) : New RAT version updated - Official version v2.0
+//
+//--------------------------------------------------------------------
+
+
+#include <iostream>
+#include <iomanip>
+#include <string>
+#include <sstream>
+#include <fstream>
+#include <vector>
+
+#include "TVector3.h"
+#include "TH2F.h"
+#include "TTree.h"
+#include "TFile.h"
+#include "TMinuit.h"
+#include "TLegend.h"
+#include "TSystem.h"
+#include "TStopwatch.h"
+#include "TLorentzVector.h"
+
+
+#include "RAT/DSReader.hh"
+#include "RAT/DS/MC.hh"
+#include "RAT/DS/MCSummary.hh"
+#include "RAT/DS/Root.hh"
+#include "RAT/DS/PMT.hh"
+//#include "RAT/DS/EV.hh"
+#include "RAT/DS/Run.hh"
+#include "RAT/DS/RunStore.hh"
+
+#include "ANNRIGd_GdNCaptureGammaGenerator.hh"
+#include "ANNRIGd_GeneratorConfigurator.hh"
+#include "ANNRIGd_ReactionProduct.hh"
+
+#include "/home/mlf/zayunsna/personal_work/HKTool.h"
+
+using namespace std;
+namespace AGd = ANNRIGdGammaSpecModel;
+AGd::ANNRIGd_GdNCaptureGammaGenerator * ANN_gen = 0;
+const int nPMT = 120;
+
+int NumGamma;
+double GammaEnergies[15];
+
+const double bufferRadius = 1850.;
+const double bufferHeight = 1470.;
+const double acrylicRadiut = 1620.;
+const double acrylicHeight = 1300.;
+const double TankRadius = 1570.;
+const double TankHeight = 1250.;
+
+
+bool CheckSinglePosForE(TVector3 start){
+	bool status = false;
+	double sX = start.X();
+	double sY = start.Y();
+	double sZ = start.Z();
+	double sR = sqrt( pow( sX, 2) + pow( sY, 2) );
+
+
+	if( (sR < bufferRadius && abs(sZ) < bufferHeight) ) { status = true;}
+//	if( (sR < bufferRadius && abs(sZ) < bufferHeight) ) {
+//		if( ( sR <= acrylicRadiut && sR >= TankRadius ) && ( abs(sZ) <= acrylicHeight && abs(sZ) >= TankHeight) ) status = false;
+//		else if ( sR <= TankRadius && abs(sZ) <= TankHeight ) status = true;
+//		else status = true;
+//	}
+	if( sX == 0 && sY == 0 && sZ == 0 ) status = false;
+
+	return status;
+}
+
+
+bool CheckSinglePos(TVector3 start){
+	bool status = false;
+	double sX = start.X();
+	double sY = start.Y();
+	double sZ = start.Z();
+	double sR = sqrt( pow( sX, 2) + pow( sY, 2) );
+
+
+	if( (sR < TankRadius && abs(sZ) < TankHeight) ) status = true;
+	//if( (abs(sX) <= TankRadius && abs(sY) <= TankRadius && abs(sZ) <= TankHeight) ) status = true;
+	if( sX == 0 && sY == 0 && sZ == 0 ) status = false;
+
+	return status;
+}
+
+TLorentzVector cal_lorentz(const TLorentzVector p1, const TLorentzVector p2){
+	TVector3 p1V = p1.Vect();
+	TVector3 p2V = p2.Vect();
+
+	double amp = ( (p1V*p2V / (p2.E() + p2.Mag())) - p1.E() ) / p2.Mag();
+
+	TVector3 ref;
+	ref.SetX(p1V.X() + amp*p2V.X());
+	ref.SetY(p1V.Y() + amp*p2V.Y());
+	ref.SetZ(p1V.Z() + amp*p2V.Z());
+
+	double energy = sqrt( ref.Mag2() + pow(p1.Mag() , 2) );
+	TLorentzVector out(ref, energy);
+
+	//cout << " Inner check : "  << amp << "  " << energy << endl;
+
+	return out;
+}
+
+
+
+int main(int nargn, char ** argn){
+
+	//---- Define the Variable
+
+	TVector3 ini;
+
+	//---- Select Data file address
+
+	//string path = "/home/mlf/zayunsna/data_storage/thermal_neutron_220816/";
+	string path = "/home/mlf/zayunsna/data_storage/Cf252/Cf_rat_Internal/";
+	string datPath = "./";
+	int nFile = atoi(argn[1]);
+
+
+	//---- Data file loading
+
+
+	//RAT::DSReader* ds=new RAT::DSReader( path.c_str() );
+	RAT::DSReader* ds=new RAT::DSReader(NULL);
+
+
+	TChain runTree("runT");
+	string nF = path+"Cf_"+Form("%d",nFile)+".root";
+	cout << nF << endl;
+	ds->Add(nF.c_str());
+	/*
+	for(int i = 0; i < nFile; ++i){
+		string nF = path+"Cf_"+Form("%d",i)+".root";
+		cout << nF << endl;
+		ds->Add(nF.c_str());
+		//runTree.Add( path.c_str() );
+		if( i == 0 ) initFile = nF;
+	}
+	*/
+
+	string outDATFile_name = "";
+	outDATFile_name = datPath+ "./dat/ext_gamma_" + Form("%d",nFile) + ".dat";
+	ofstream outDATFile;
+	outDATFile.open(outDATFile_name.c_str());
+
+	long nEvent=ds->GetTotal();
+
+	//---- Event data Initializing
+	//runTree.Add(initFile.c_str());
+	//RAT::DS::RunStore::SetReadTree(&runTree);
+	cout << "\n Data File Loading ...." << endl;
+	//RAT::DS::Run* run = RAT::DS::RunStore::Get()->GetRun(1);
+
+
+	//---- 
+	//if( run == 0)
+	//{
+	//	cout << "\nRun / file not Found!" << endl;
+	//	return 0;
+	//}
+	cout << "---------------------------------- " << endl; 
+	cout << "\n Data Loading Success!" <<endl;
+
+
+	//---- PMT geometry information
+	//
+
+	//---- Histogram Structure
+
+	TVector3 now;
+	TVector3 prev;
+
+
+	TH1D * h_multi_ori = new TH1D("h_multi_ori","; multiplicity;", 15, 0, 15);
+	TH1D * h_multi_ANNRI = new TH1D("h_multi_ANNRI","; multiplicity;", 15, 0, 15);
+
+
+	//---- ANNRI Definition
+	const double conv_atomic_unit = 931.494; // MeV. e.g Carbon 12 = 12 * 931.494 MeV;
+	const double gamma_mass = 0;
+	const int Gd_CASCADE = 1; // CASCADE = 1:discrete peak + continuum part, 2:discrete peaks, 3:continuum part
+	const int Gd_CAPTURE = 1; // CAPTURE = 1:natural, 2:enriched 157Gd, 3:enriched 155Gd
+	string Gd155_ROOTFile = "./cont_dat/156GdContTbl__E1SLO4__HFB.root";
+	string Gd157_ROOTFile = "./cont_dat/158GdContTbl__E1SLO4__HFB.root";
+
+	//	ANN_gen = new AGd::ANNRIGd_GdNCaptureGammaGenerator();
+	//	AGd::ANNRIGd_GeneratorConfigurator::Configure(*ANN_gen, Gd_CAPTURE, Gd_CASCADE, Gd155_ROOTFile, Gd157_ROOTFile); 
+	//	AGd::ReactionProductVector Reaction_prod;
+
+	ANN_gen = new AGd::ANNRIGd_GdNCaptureGammaGenerator();
+	AGd::ANNRIGd_GeneratorConfigurator::Configure(*ANN_gen, Gd_CAPTURE, Gd_CASCADE, Gd155_ROOTFile, Gd157_ROOTFile); 
+	AGd::ReactionProductVector Reaction_prod;
+
+
+	//---- Output file set
+
+	//TFile * out;
+
+	TString out_file = argn[2];
+
+	out_file = out_file;
+
+	if( !out_file.EndsWith(".root",TString::kIgnoreCase) ){
+		out_file.Append(".root");
+	}
+	if( !gSystem->AccessPathName(out_file) ){
+		gSystem->Rename(out_file, out_file+".Previous_result");
+	}
+
+	TFile * out = new TFile(out_file,"RECREATE");
+
+	//---- Process start
+
+	double this_mass = 0.;
+
+	double nE = 0.;
+	TVector3 nCap_pos, nCap_mom;
+	TVector3 mom;
+	TVector3 pos;
+	TVector3 temp_mom, temp_pos;
+	double gT;
+	int ID;
+	double genTime =0 ;
+	vector<TVector3> gamma_vec;
+	vector<TLorentzVector> gamma_info;
+	vector<TVector3> gamma_pos;
+	vector<double> gamma_dT;
+
+
+	TTree * tree = new TTree("tree","tree");
+	tree->Branch("temp_mom", &temp_mom);
+	tree->Branch("temp_pos", &temp_pos);
+	tree->Branch("gT", &gT, "gT/D");
+
+
+
+	RAT::DS::MC* mc;
+	cout << " Total " << nEvent << " event founded. " << endl;
+	cout << "\n---------------------------------- " << endl; 
+	cout << "               Start               " << endl;
+	cout << "---------------------------------- " << endl; 
+	cout << endl;
+
+	//---- Processing timer set
+
+	TStopwatch * clck = new TStopwatch();
+	clck->Start();
+
+	//---- Main Loop Start
+
+	nEvent =10;
+
+
+	for ( long l=0 ; l < nEvent;l++ ){
+
+
+		//---- Procedure status check	
+
+		//ProgressBar( l+1 , nEvent);
+
+		//---- Event infomation loading
+
+		RAT::DS::Root* root=ds->GetEvent(l);
+		mc=root->GetMC();
+		//RAT::DS::MCSummary* mcs=mc->GetMCSummary();
+
+		gamma_vec.clear();
+		gamma_info.clear();
+		gamma_pos.clear();
+		gamma_dT.clear();
+
+		int nGamma = 0;
+		int nGamma_ori = 0;
+		int nGamma_ANNRI = 0;
+
+		double temp_GT = 0.;
+		double Gd_capT = 0.;
+		double save_Gd_capT = 0.;
+		double dT = 0.;
+
+
+		tree->Reset();
+
+		int nTrack = mc->GetMCTrackCount();
+		for(int i = 0; i < nTrack; i++){
+			RAT::DS::MCTrack * add_info = mc->GetMCTrack(i);
+			string particle = add_info->GetParticleName();
+
+			RAT::DS::MCTrackStep * trackStep = add_info->GetMCTrackStep(0);
+			string processName = trackStep->GetProcess();
+			double global_time = trackStep->GetGlobalTime();
+
+			if( particle == "gamma" && processName == "nCapture"){
+				//cout << l << "  " << i << "  " << particle << "  " << processName << "  " << temp_GT << "  " << global_time << "  " << nGamma_ori << endl;
+				if( nGamma_ori != 0 && temp_GT != global_time ) { 
+					h_multi_ori->Fill(nGamma_ori);
+					nGamma_ori = 0;
+				}
+				nGamma_ori++;
+			}
+
+			temp_GT = global_time;
+
+			if( particle == "Gd158" && processName == "nCapture"){
+				Reaction_prod = ANN_gen->Generate_158Gd();
+				this_mass = 158*conv_atomic_unit;
+				nCap_pos = trackStep->GetEndpoint();
+				nCap_mom = trackStep->GetMomentum();
+				Gd_capT = global_time;
+				
+			}
+			else if( particle == "Gd156" && processName == "nCapture"){
+				Reaction_prod = ANN_gen->Generate_156Gd();
+				this_mass = 156*conv_atomic_unit;
+				nCap_pos = trackStep->GetEndpoint();
+				nCap_mom = trackStep->GetMomentum();
+				Gd_capT = global_time;
+			}
+			else {
+				nGamma_ANNRI = 0;
+				continue;
+			}
+			
+			double n_energy = sqrt( nCap_mom.Mag2() + pow(this_mass,2) );
+			TLorentzVector neutron(nCap_mom, n_energy);
+
+			for(auto&& gamma_list: Reaction_prod){
+				TLorentzVector gamma(gamma_list.px_, gamma_list.py_, gamma_list.pz_, gamma_list.eTot_);
+				gamma_info.push_back(cal_lorentz(gamma, neutron));
+				//double b = gamma.Vect().Mag();
+				//double a = cal_lorentz(gamma, neutron).Vect().Mag();
+				//cout << "test : " << a << "  " << b << endl;
+				gamma_vec.push_back( gamma_info.back().Vect());
+				gamma_pos.push_back( nCap_pos );
+				//gamma_dT.push_back(dT);
+
+				temp_mom = gamma_info.back().Vect();
+				temp_pos = nCap_pos;
+				gT = Gd_capT;
+				nGamma_ANNRI++;
+				tree->Fill();
+			}
+			//cout << "  --> " << i << "  " <<  this_mass << "  " << nCap_pos.X() << "  " << nCap_pos.Y() << "  " << nCap_pos.Z() << "  " << n_energy << "  " << gamma_vec.size() << "  " << nGamma_ANNRI << endl;
+
+			h_multi_ANNRI->Fill(nGamma_ANNRI);
+			
+		}
+
+		nGamma = (int)gamma_vec.size();
+		int tttt = tree->GetEntries();
+		cout << nGamma << "  " << tttt << endl;
+
+
+		if( nGamma == 0 ) continue;
+		outDATFile << nGamma << endl;
+		//cout << nGamma << endl;
+		for(int iGamma = 0 ; iGamma < nGamma; ++iGamma){
+			ID = 22; // gamma PDG
+			mom = gamma_vec.at(iGamma) * 1e-3; // Unit : GeV
+			pos = gamma_pos.at(iGamma);
+			//genTime = gamma_dT.at(iGamma);
+
+			/*
+			outDATFile << 1 << "  " << ID << "  " << 0 << "  " << 0;
+			outDATFile << "  " << setw(12) << mom.X() << "  " << setw(12) << mom.Y() << "  " << setw(12) << mom.Z();
+			outDATFile << setw(6) << gamma_mass;
+			//outDATFile << "  " << setw(6) << 0;
+			outDATFile << "  " << setw(6) << genTime;
+			outDATFile << "  " << setw(12) << pos.X() << "  " << setw(12) << pos.Y() << "  " << setw(12) << pos.Z();
+			outDATFile << endl;
+			*/
+			
+			cout << 1 << "  " << ID << "  " << 0 << "  " << 0;
+			cout << "  " << setw(12) << mom.X() << "  " << setw(12) << mom.Y() << "  " << setw(12) << mom.Z();
+			cout << setw(12) << gamma_mass;
+			cout << "  " << setw(12) << genTime;
+			//cout << "  " << setw(12) << nCap_pos.X() << "  " << setw(12) << nCap_pos.Y() << "  " << setw(12) << nCap_pos.Z();
+			cout << "  " << setw(12) << pos.X() << "  " << setw(12) << pos.Y() << "  " << setw(12) << pos.Z();
+			cout << endl;
+			//cout << "  " << 0 << "  " << 0 << "  " << 0 << endl;
+			
+
+		}
+
+
+
+		tree->Fill();
+	} //---- Main loop End
+
+	outDATFile.close();
+	//---- timer Stop and time calculation
+	clck->Stop();
+	double CPU_time = clck->CpuTime();
+	double Real_time = clck->RealTime();
+	double Avg_time = CPU_time / nEvent;
+
+	cout << "\n" << endl;
+	cout << "----------------------------------\n " << endl; 
+	cout << " Time to Validate " << nEvent << " events " << endl;
+	cout << endl;
+	cout << " CPU Time               = " << CPU_time << " sec" << endl;
+	cout << "                          " << CPU_time/60 << " min" << endl;
+	cout << " Real Time              = " << Real_time << " sec" << endl;
+	cout << "                          " << Real_time/60 << " min" << endl;
+	cout << " Average Time per event = " << Avg_time << " sec" << endl;
+	cout << "\n---------------------------------- " << endl; 
+
+	//---- Data Wirte
+
+	h_multi_ori->Write();
+	h_multi_ANNRI->Write();
+	out->Close();
+
+	cout << "         Processing Done           " << endl;
+	cout << "---------------------------------- " << endl; 
+
+}
